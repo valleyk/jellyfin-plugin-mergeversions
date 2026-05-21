@@ -205,9 +205,7 @@ namespace Jellyfin.Plugin.MergeVersions
                 .ToList();
 
             var alternateVersionsChanged = false;
-            foreach (var item in items.Where(i =>
-                !i.Id.Equals(primaryVersion.Id) &&
-                !alternateVersionsOfPrimary.Any(l => l.ItemId == i.Id)))
+            foreach (var item in items.Where(i => !i.Id.Equals(primaryVersion.Id)))
             {
                 var beforePrimaryRaw = GetPrimaryVersionIdRawCompat(item);
                 var beforePresentationKeyRaw = GetPresentationUniqueKeyRawCompat(item);
@@ -250,7 +248,7 @@ namespace Jellyfin.Plugin.MergeVersions
                     afterPresentationKeyRaw ?? "<null>",
                     persistedPresentationKeyRaw ?? "<null>");
 
-                // TODO: due to check in foreach it can't be an alternate version yet?
+                // Idempotent add: keep list unique while still forcing metadata rewrite.
                 AddToAlternateVersionsIfNotPresent(alternateVersionsOfPrimary,
                                                 new LinkedChild { Path = item.Path,
                                                                   ItemId = item.Id });
