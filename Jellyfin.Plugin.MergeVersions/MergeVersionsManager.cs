@@ -202,7 +202,7 @@ namespace Jellyfin.Plugin.MergeVersions
                 !i.Id.Equals(primaryVersion.Id) &&
                 !alternateVersionsOfPrimary.Any(l => l.ItemId == i.Id)))
             {
-                item.SetPrimaryVersionId(primaryVersion.Id);
+                item.PrimaryVersionId = primaryVersion.Id.ToString("N");
 
                 await item.UpdateToRepositoryAsync(
                         ItemUpdateType.MetadataEdit,
@@ -267,7 +267,7 @@ namespace Jellyfin.Plugin.MergeVersions
 
             foreach (var link in item.GetLinkedAlternateVersions())
             {
-                link.SetPrimaryVersionId(null);
+                link.PrimaryVersionId = null;
                 link.LinkedAlternateVersions = [];
 
                 await link.UpdateToRepositoryAsync(
@@ -278,7 +278,7 @@ namespace Jellyfin.Plugin.MergeVersions
             }
 
             item.LinkedAlternateVersions = [];
-            item.SetPrimaryVersionId(null);
+            item.PrimaryVersionId = null;
             await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
                 .ConfigureAwait(false);
         }
