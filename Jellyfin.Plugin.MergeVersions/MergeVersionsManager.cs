@@ -193,6 +193,13 @@ namespace Jellyfin.Plugin.MergeVersions
                     .First();
             }
 
+            _logger.LogInformation(
+                "Merge candidate group: count={Count}; primary={PrimaryId}; primaryPath={PrimaryPath}; primaryKey={PrimaryKey}",
+                items.Count,
+                primaryVersion.Id,
+                primaryVersion.Path,
+                GetPresentationUniqueKeyRawCompat(primaryVersion) ?? "<null>");
+
             var alternateVersionsOfPrimary = primaryVersion
                 .LinkedAlternateVersions.Where(l => items.Any(i => i.Path == l.Path))
                 .ToList();
@@ -202,10 +209,18 @@ namespace Jellyfin.Plugin.MergeVersions
                 !i.Id.Equals(primaryVersion.Id) &&
                 !alternateVersionsOfPrimary.Any(l => l.ItemId == i.Id)))
             {
-                SetPrimaryVersionIdCompat(item, primaryVersion.Id);
+                var beforePrimaryRaw = GetPrimaryVersionIdRawCompat(item);
+                var beforePresentationKeyRaw = GetPresentationUniqueKeyRawCompat(item);
+
+                var primarySetPath = SetPrimaryVersionIdCompat(item, primaryVersion.Id);
+                var keySetPath = "<not-attempted>";
                 if (TryGetPresentationUniqueKeyCompat(primaryVersion, out var primaryPresentationKey))
                 {
-                    SetPresentationUniqueKeyCompat(item, primaryPresentationKey);
+                    keySetPath = SetPresentationUniqueKeyCompat(item, primaryPresentationKey);
+                }
+                else
+                {
+                    keySetPath = "<source-key-missing>";
                 }
 
                 await item.UpdateToRepositoryAsync(
@@ -213,6 +228,27 @@ namespace Jellyfin.Plugin.MergeVersions
                         CancellationToken.None
                     )
                     .ConfigureAwait(false);
+
+                var afterPrimaryRaw = GetPrimaryVersionIdRawCompat(item);
+                var afterPresentationKeyRaw = GetPresentationUniqueKeyRawCompat(item);
+                var persisted = _libraryManager.GetItemById<Video>(item.Id);
+                var persistedPrimaryRaw = persisted is null ? "<reload-null>" : GetPrimaryVersionIdRawCompat(persisted);
+                var persistedPresentationKeyRaw = persisted is null
+                    ? "<reload-null>"
+                    : GetPresentationUniqueKeyRawCompat(persisted);
+
+                _logger.LogInformation(
+                    "Merge write result: item={ItemId}; path={ItemPath}; setPrimary={PrimarySetPath}; setKey={KeySetPath}; primary(before={BeforePrimary}, after={AfterPrimary}, persisted={PersistedPrimary}); key(before={BeforeKey}, after={AfterKey}, persisted={PersistedKey})",
+                    item.Id,
+                    item.Path,
+                    primarySetPath,
+                    keySetPath,
+                    beforePrimaryRaw ?? "<null>",
+                    afterPrimaryRaw ?? "<null>",
+                    persistedPrimaryRaw ?? "<null>",
+                    beforePresentationKeyRaw ?? "<null>",
+                    afterPresentationKeyRaw ?? "<null>",
+                    persistedPresentationKeyRaw ?? "<null>");
 
                 // TODO: due to check in foreach it can't be an alternate version yet?
                 AddToAlternateVersionsIfNotPresent(alternateVersionsOfPrimary,
@@ -322,7 +358,19 @@ namespace Jellyfin.Plugin.MergeVersions
             return Guid.TryParse(value.ToString(), out primaryVersionId);
         }
 
-        private void SetPrimaryVersionIdCompat(Video item, Guid? primaryVersionId)
+        private string GetPrimaryVersionIdRawCompat(Video item)
+        {
+            var property = item.GetType().GetProperty("PrimaryVersionId", BindingFlags.Instance | BindingFlags.Public);
+            if (property is null || !property.CanRead)
+            {
+                return null;
+            }
+
+            var value = property.GetValue(item);
+            return value?.ToString();
+        }
+
+        private string SetPrimaryVersionIdCompat(Video item, Guid? primaryVersionId)
         {
             var itemType = item.GetType();
             var methods = itemType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
@@ -353,31 +401,34 @@ namespace Jellyfin.Plugin.MergeVersions
                 }
 
                 method.Invoke(item, [argument]);
-                return;
+                return $"method:{parameterType.Name}";
             }
 
             var property = itemType.GetProperty("PrimaryVersionId", BindingFlags.Instance | BindingFlags.Public);
             if (property is null || !property.CanWrite)
             {
-                return;
+                return "no-writable-target";
             }
 
             if (property.PropertyType == typeof(Guid?))
             {
                 property.SetValue(item, primaryVersionId);
-                return;
+                return "property:NullableGuid";
             }
 
             if (property.PropertyType == typeof(Guid))
             {
                 property.SetValue(item, primaryVersionId ?? Guid.Empty);
-                return;
+                return "property:Guid";
             }
 
             if (property.PropertyType == typeof(string))
             {
                 property.SetValue(item, primaryVersionId?.ToString("N"));
+                return "property:String";
             }
+
+            return $"property:unsupported:{property.PropertyType.Name}";
         }
 
         private IEnumerable<Video> GetLinkedAlternateVersionsCompat(Video item)
@@ -443,11 +494,22 @@ namespace Jellyfin.Plugin.MergeVersions
             return true;
         }
 
-        private void SetPresentationUniqueKeyCompat(BaseItem item, string presentationUniqueKey)
+        private string GetPresentationUniqueKeyRawCompat(BaseItem item)
+        {
+            var property = item.GetType().GetProperty("PresentationUniqueKey", BindingFlags.Instance | BindingFlags.Public);
+            if (property is null || !property.CanRead)
+            {
+                return null;
+            }
+
+            return property.GetValue(item)?.ToString();
+        }
+
+        private string SetPresentationUniqueKeyCompat(BaseItem item, string presentationUniqueKey)
         {
             if (string.IsNullOrWhiteSpace(presentationUniqueKey))
             {
-                return;
+                return "skip-empty-value";
             }
 
             var itemType = item.GetType();
@@ -460,7 +522,7 @@ namespace Jellyfin.Plugin.MergeVersions
             if (setMethod is not null)
             {
                 setMethod.Invoke(item, [presentationUniqueKey]);
-                return;
+                return "method:String";
             }
 
             var property = itemType.GetProperty(
@@ -468,10 +530,11 @@ namespace Jellyfin.Plugin.MergeVersions
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             if (property?.SetMethod is null)
             {
-                return;
+                return "no-writable-target";
             }
 
             property.SetValue(item, presentationUniqueKey);
+            return "property:String";
         }
 
         private bool IsEligible(BaseItem item)
