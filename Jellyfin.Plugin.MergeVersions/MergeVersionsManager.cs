@@ -93,8 +93,7 @@ namespace Jellyfin.Plugin.MergeVersions
                     x.SeriesName,
                     x.SeasonName,
                     x.Name,
-                    x.IndexNumber,
-                    x.ProductionYear
+                    x.IndexNumber
                 })
                 .Where(x => x.Count() > 1)
                 .ToList();
@@ -204,6 +203,10 @@ namespace Jellyfin.Plugin.MergeVersions
                 !alternateVersionsOfPrimary.Any(l => l.ItemId == i.Id)))
             {
                 SetPrimaryVersionIdCompat(item, primaryVersion.Id);
+                if (TryGetPresentationUniqueKeyCompat(primaryVersion, out var primaryPresentationKey))
+                {
+                    SetPresentationUniqueKeyCompat(item, primaryPresentationKey);
+                }
 
                 await item.UpdateToRepositoryAsync(
                         ItemUpdateType.MetadataEdit,
@@ -410,6 +413,65 @@ namespace Jellyfin.Plugin.MergeVersions
                 .Select(link => _libraryManager.GetItemById<Video>(link.ItemId.Value))
                 .Where(video => video is not null)
                 .Cast<Video>();
+        }
+
+        private bool TryGetPresentationUniqueKeyCompat(BaseItem item, out string presentationUniqueKey)
+        {
+            presentationUniqueKey = string.Empty;
+
+            var itemType = item.GetType();
+            var getMethod = itemType.GetMethod("GetPresentationUniqueKey", Type.EmptyTypes);
+            if (getMethod is not null && getMethod.Invoke(item, null) is string methodValue
+                && !string.IsNullOrWhiteSpace(methodValue))
+            {
+                presentationUniqueKey = methodValue;
+                return true;
+            }
+
+            var property = itemType.GetProperty("PresentationUniqueKey", BindingFlags.Instance | BindingFlags.Public);
+            if (property is null || !property.CanRead)
+            {
+                return false;
+            }
+
+            if (property.GetValue(item) is not string propertyValue || string.IsNullOrWhiteSpace(propertyValue))
+            {
+                return false;
+            }
+
+            presentationUniqueKey = propertyValue;
+            return true;
+        }
+
+        private void SetPresentationUniqueKeyCompat(BaseItem item, string presentationUniqueKey)
+        {
+            if (string.IsNullOrWhiteSpace(presentationUniqueKey))
+            {
+                return;
+            }
+
+            var itemType = item.GetType();
+            var setMethod = itemType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .FirstOrDefault(m =>
+                    string.Equals(m.Name, "SetPresentationUniqueKey", StringComparison.Ordinal)
+                    && m.GetParameters().Length == 1
+                    && m.GetParameters()[0].ParameterType == typeof(string));
+
+            if (setMethod is not null)
+            {
+                setMethod.Invoke(item, [presentationUniqueKey]);
+                return;
+            }
+
+            var property = itemType.GetProperty(
+                "PresentationUniqueKey",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (property?.SetMethod is null)
+            {
+                return;
+            }
+
+            property.SetValue(item, presentationUniqueKey);
         }
 
         private bool IsEligible(BaseItem item)
