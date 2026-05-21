@@ -406,7 +406,8 @@ namespace Jellyfin.Plugin.MergeVersions
             }
 
             return item.LinkedAlternateVersions
-                .Select(link => _libraryManager.GetItemById<Video>(link.ItemId))
+                .Where(link => link.ItemId.HasValue)
+                .Select(link => _libraryManager.GetItemById<Video>(link.ItemId.Value))
                 .Where(video => video is not null)
                 .Cast<Video>();
         }
