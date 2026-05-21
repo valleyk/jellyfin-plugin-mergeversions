@@ -175,7 +175,7 @@ namespace Jellyfin.Plugin.MergeVersions
             }
 
             var primaryVersion = items.FirstOrDefault(i =>
-                i.MediaSourceCount > 1 && !i.PrimaryVersionId.HasValue
+                i.MediaSourceCount > 1 && string.IsNullOrEmpty(i.PrimaryVersionId)
             );
             if (primaryVersion is null)
             {
@@ -250,9 +250,14 @@ namespace Jellyfin.Plugin.MergeVersions
                 return;
             }
 
-            if (item.LinkedAlternateVersions.Length == 0 && item.PrimaryVersionId.HasValue)
+            if (item.LinkedAlternateVersions.Length == 0 && !string.IsNullOrEmpty(item.PrimaryVersionId))
             {
-                item = _libraryManager.GetItemById<Video>(item.PrimaryVersionId.Value);
+                if (!Guid.TryParse(item.PrimaryVersionId, out var primaryVersionId))
+                {
+                    return;
+                }
+
+                item = _libraryManager.GetItemById<Video>(primaryVersionId);
             }
 
             if (item is null)
@@ -260,7 +265,7 @@ namespace Jellyfin.Plugin.MergeVersions
                 return;
             }
 
-            foreach (var link in _libraryManager.GetLinkedAlternateVersions(item))
+            foreach (var link in item.GetLinkedAlternateVersions())
             {
                 link.SetPrimaryVersionId(null);
                 link.LinkedAlternateVersions = [];
