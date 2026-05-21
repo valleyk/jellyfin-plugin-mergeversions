@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -42,7 +43,7 @@ namespace Jellyfin.Plugin.MergeVersions
             var duplicateMovies = GetMoviesFromLibrary()
                 .GroupBy(x => x.ProviderIds["Tmdb"])
                 .Where(group => group.Count() > 1 &&
-                group.Any(movie => movie.PrimaryVersionId == null &&
+                group.Any(movie => !HasPrimaryVersionId(movie) &&
                                     !movie.LinkedAlternateVersions.Any()))
                 .ToList();
 
@@ -175,7 +176,7 @@ namespace Jellyfin.Plugin.MergeVersions
             }
 
             var primaryVersion = items.FirstOrDefault(i =>
-                i.MediaSourceCount > 1 && string.IsNullOrEmpty(i.PrimaryVersionId)
+                i.MediaSourceCount > 1 && !HasPrimaryVersionId(i)
             );
             if (primaryVersion is null)
             {
@@ -202,7 +203,7 @@ namespace Jellyfin.Plugin.MergeVersions
                 !i.Id.Equals(primaryVersion.Id) &&
                 !alternateVersionsOfPrimary.Any(l => l.ItemId == i.Id)))
             {
-                item.PrimaryVersionId = primaryVersion.Id.ToString("N");
+                SetPrimaryVersionIdCompat(item, primaryVersion.Id);
 
                 await item.UpdateToRepositoryAsync(
                         ItemUpdateType.MetadataEdit,
@@ -250,13 +251,8 @@ namespace Jellyfin.Plugin.MergeVersions
                 return;
             }
 
-            if (item.LinkedAlternateVersions.Length == 0 && !string.IsNullOrEmpty(item.PrimaryVersionId))
+            if (item.LinkedAlternateVersions.Length == 0 && TryGetPrimaryVersionId(item, out var primaryVersionId))
             {
-                if (!Guid.TryParse(item.PrimaryVersionId, out var primaryVersionId))
-                {
-                    return;
-                }
-
                 item = _libraryManager.GetItemById<Video>(primaryVersionId);
             }
 
@@ -265,9 +261,9 @@ namespace Jellyfin.Plugin.MergeVersions
                 return;
             }
 
-            foreach (var link in item.GetLinkedAlternateVersions())
+            foreach (var link in GetLinkedAlternateVersionsCompat(item))
             {
-                link.PrimaryVersionId = null;
+                SetPrimaryVersionIdCompat(link, null);
                 link.LinkedAlternateVersions = [];
 
                 await link.UpdateToRepositoryAsync(
@@ -278,9 +274,141 @@ namespace Jellyfin.Plugin.MergeVersions
             }
 
             item.LinkedAlternateVersions = [];
-            item.PrimaryVersionId = null;
+            SetPrimaryVersionIdCompat(item, null);
             await item.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None)
                 .ConfigureAwait(false);
+        }
+
+        private bool HasPrimaryVersionId(Video item)
+        {
+            return TryGetPrimaryVersionId(item, out _);
+        }
+
+        private bool TryGetPrimaryVersionId(Video item, out Guid primaryVersionId)
+        {
+            primaryVersionId = Guid.Empty;
+
+            var property = item.GetType().GetProperty("PrimaryVersionId", BindingFlags.Instance | BindingFlags.Public);
+            if (property is null || !property.CanRead)
+            {
+                return false;
+            }
+
+            var value = property.GetValue(item);
+            if (value is null)
+            {
+                return false;
+            }
+
+            if (value is Guid guidValue)
+            {
+                if (guidValue == Guid.Empty)
+                {
+                    return false;
+                }
+
+                primaryVersionId = guidValue;
+                return true;
+            }
+
+            if (value is string stringValue)
+            {
+                return Guid.TryParse(stringValue, out primaryVersionId);
+            }
+
+            return Guid.TryParse(value.ToString(), out primaryVersionId);
+        }
+
+        private void SetPrimaryVersionIdCompat(Video item, Guid? primaryVersionId)
+        {
+            var itemType = item.GetType();
+            var methods = itemType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .Where(m => string.Equals(m.Name, "SetPrimaryVersionId", StringComparison.Ordinal))
+                .Where(m => m.GetParameters().Length == 1)
+                .ToList();
+
+            foreach (var method in methods)
+            {
+                var parameterType = method.GetParameters()[0].ParameterType;
+                object argument;
+
+                if (parameterType == typeof(Guid?))
+                {
+                    argument = primaryVersionId;
+                }
+                else if (parameterType == typeof(Guid))
+                {
+                    argument = primaryVersionId ?? Guid.Empty;
+                }
+                else if (parameterType == typeof(string))
+                {
+                    argument = primaryVersionId?.ToString("N");
+                }
+                else
+                {
+                    continue;
+                }
+
+                method.Invoke(item, [argument]);
+                return;
+            }
+
+            var property = itemType.GetProperty("PrimaryVersionId", BindingFlags.Instance | BindingFlags.Public);
+            if (property is null || !property.CanWrite)
+            {
+                return;
+            }
+
+            if (property.PropertyType == typeof(Guid?))
+            {
+                property.SetValue(item, primaryVersionId);
+                return;
+            }
+
+            if (property.PropertyType == typeof(Guid))
+            {
+                property.SetValue(item, primaryVersionId ?? Guid.Empty);
+                return;
+            }
+
+            if (property.PropertyType == typeof(string))
+            {
+                property.SetValue(item, primaryVersionId?.ToString("N"));
+            }
+        }
+
+        private IEnumerable<Video> GetLinkedAlternateVersionsCompat(Video item)
+        {
+            var itemType = item.GetType();
+            var getLinkedMethod = itemType.GetMethod("GetLinkedAlternateVersions", Type.EmptyTypes);
+            if (getLinkedMethod is not null && getLinkedMethod.Invoke(item, null) is System.Collections.IEnumerable fromItem)
+            {
+                return fromItem.Cast<object>().OfType<Video>();
+            }
+
+            var libraryManagerType = _libraryManager.GetType();
+            var libraryMethod = libraryManagerType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .FirstOrDefault(m =>
+                {
+                    if (!string.Equals(m.Name, "GetLinkedAlternateVersions", StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+
+                    var parameters = m.GetParameters();
+                    return parameters.Length == 1 && parameters[0].ParameterType.IsAssignableFrom(itemType);
+                });
+
+            if (libraryMethod is not null
+                && libraryMethod.Invoke(_libraryManager, [item]) is System.Collections.IEnumerable fromLibrary)
+            {
+                return fromLibrary.Cast<object>().OfType<Video>();
+            }
+
+            return item.LinkedAlternateVersions
+                .Select(link => _libraryManager.GetItemById<Video>(link.ItemId))
+                .Where(video => video is not null)
+                .Cast<Video>();
         }
 
         private bool IsEligible(BaseItem item)
